@@ -6,7 +6,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 
-#define DEST_IP "192.168.1.10"  // IP of RPi #2
+#define DEST_IP "172.20.10.3"  // IP of RPi #2
 #define DEST_PORT 12345
 
 int main() {
