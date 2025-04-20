@@ -4,6 +4,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -233,8 +234,12 @@ static int __init pinet_init(void)
         unregister_netdev(pinet_dev);
         return pinet_major;
     }
-
-    pinet_class = class_create("pinet_class");
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0)
+    	pinet_class = class_create("pinet_class");
+    #else
+        pinet_class = class_create(THIS_MODULE, "pinet_class");
+    #endif
+    
     if (IS_ERR(pinet_class)) {
         unregister_chrdev(pinet_major, DEVICE_NAME);
         unregister_netdev(pinet_dev);
