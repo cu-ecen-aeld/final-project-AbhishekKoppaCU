@@ -1,42 +1,57 @@
-#!/bin/bash
+#!/bin/sh
+set -e
 
-DEVICE_NAME="pinet"
+module="PiNet"
+device="pinet"
+mode="666"
+ip_addr="192.168.1.10/24"
+iface="pinet0"
 
-# Load the PiNet kernel module
-echo "[+] Inserting PiNet kernel module..."
-sudo insmod PiNet.ko
-
-# Wait briefly to ensure /dev creation logs are flushed
-sleep 1
-
-# Extract major number from dmesg
-MAJOR=$(dmesg | grep "Char device /dev/${DEVICE_NAME}" | tail -n 1 | awk '{print $NF}')
-MAJOR=${MAJOR:-$(grep ${DEVICE_NAME} /proc/devices | awk '{print $1}')}
-
-if [[ -z "$MAJOR" ]]; then
-    echo "[!] Failed to detect major number for /dev/${DEVICE_NAME}"
+# Detect group: use staff if available, otherwise wheel
+if grep -q '^staff:' /etc/group; then
+    group="staff"
 else
-    # Create char device if not present
-    if [[ ! -e /dev/${DEVICE_NAME} ]]; then
-        echo "[+] Creating /dev/${DEVICE_NAME} with major $MAJOR..."
-        sudo mknod /dev/${DEVICE_NAME} c $MAJOR 0
-        sudo chmod 666 /dev/${DEVICE_NAME}
-    else
-        echo "[i] /dev/${DEVICE_NAME} already exists."
-    fi
+    group="wheel"
 fi
 
-# Bring up the virtual interface
-echo "[+] Setting interface pinet0 UP..."
-sudo ip link set pinet0 up
+# Load kernel module
+if [ -e "${module}.ko" ]; then
+    echo "[+] Inserting locally built ${module}.ko..."
+    insmod "./${module}.ko"
+else
+    echo "[i] ${module}.ko not found locally, trying modprobe..."
+    modprobe "${module}"
+fi
 
-# Assign IP address to the interface
-echo "[+] Assigning IP 192.168.1.10/24 to pinet0..."
-sudo ip addr add 192.168.1.10/24 dev pinet0
+# Wait for logs to flush
+sleep 1
 
-# Show interface info
-echo "[+] Current interface status:"
-ip addr show dev pinet0
+# Extract major number
+major=$(dmesg | grep "Char device /dev/${device}" | tail -n 1 | awk '{print $NF}')
+major=${major:-$(grep "${device}" /proc/devices | awk '{print $1}')}
 
-echo "[✓] PiNet virtual network + char driver setup complete!"
+if [ -z "$major" ]; then
+    echo "[!] Failed to detect major number for /dev/${device}"
+    exit 1
+fi
+
+# Create /dev entry
+if [ ! -e "/dev/${device}" ]; then
+    echo "[+] Creating /dev/${device} with major $major..."
+    rm -f "/dev/${device}"
+    mknod "/dev/${device}" c "$major" 0
+    chgrp "$group" "/dev/${device}"
+    chmod "$mode" "/dev/${device}"
+else
+    echo "[i] /dev/${device} already exists."
+fi
+
+# Setup network interface
+echo "[+] Bringing up $iface..."
+ip link set "$iface" up
+
+echo "[+] Assigning IP $ip_addr to $iface..."
+ip addr add "$ip_addr" dev "$iface"
+
+echo "[✓] ${module} network + char device setup complete."
 
