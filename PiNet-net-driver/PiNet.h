@@ -33,3 +33,10 @@
 #define SNULL_TIMEOUT 5   /* In jiffies */
 
 extern struct net_device *PiNet_devs[];
+
+
+/* 
+ * This function sends sensor data via the pinet network driver.
+ * It takes a pointer to the data buffer and the length.
+ */
+int pinet_send_sensor_data(uint8_t *data, size_t len);

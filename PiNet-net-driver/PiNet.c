@@ -15,7 +15,8 @@
 #include <linux/uaccess.h>
 #include <linux/device.h>
 #include <linux/ip.h>       
-#include <linux/udp.h>      
+#include <linux/udp.h>
+#include <linux/inet.h>     
 
 MODULE_AUTHOR("Abhishek & Nalin");
 MODULE_LICENSE("GPL");
@@ -25,10 +26,20 @@ MODULE_DESCRIPTION("pinet: A Minimal Virtual Network + Char Driver");
 #define pinet_TX_INTR 0x0002
 
 #define PINET_MAX_PAYLOAD 4  // Limit payload to 4 bytes (int-sized)
-#define PINET_QUEUE_DEPTH  64  
+#define PINET_QUEUE_DEPTH  1024
 
 #define DEVICE_NAME "pinet"
 #define DEVICE "/dev/pinet"
+
+
+#define PINET_SENSOR_SRC_IP   "192.168.1.10" // dummy local IP
+#define PINET_SENSOR_DST_IP   "192.168.1.99" // your pinet app IP
+#define PINET_SENSOR_SRC_PORT 1234
+#define PINET_SENSOR_DST_PORT 5678
+
+#define PINET_IOCTL_SEND_SENSOR_DATA _IOW('p', 1, int)
+
+
 static int pinet_major;
 static struct class *pinet_class;
 
@@ -52,6 +63,7 @@ struct pinet_priv {
     int status;                     // Interrupt status / driver state
     struct pinet_packet *rx_queue; // Incoming packets from socket netif_rx()
     struct pinet_packet *tx_queue; // Outgoing packets to be read via /dev/pinet
+    //int tx_queue_len;
 
     int rx_int_enabled;
 
@@ -206,8 +218,6 @@ static netdev_tx_t pinet_tx(struct sk_buff *skb, struct net_device *dev)
     return NETDEV_TX_OK;
 }
 
-
-
 static int pinet_open(struct net_device *dev)
 {
     netif_start_queue(dev);
@@ -239,7 +249,7 @@ static void pinet_setup(struct net_device *dev)
     dev->netdev_ops = &pinet_netdev_ops;
     dev->flags |= IFF_NOARP;
     dev->features |= NETIF_F_HW_CSUM;
-    dev->tx_queue_len = 1000;
+    //dev->tx_queue_len = 1000;
     eth_hw_addr_random(dev);
 
     struct pinet_priv *priv = netdev_priv(dev);
@@ -280,6 +290,9 @@ ssize_t pinet_char_read(struct file *filp, char __user *buf, size_t count, loff_
     struct pinet_packet *pkt;
     ssize_t ret = 0;
 
+    if (!dev)
+        return -EINVAL;
+
     if (count < PINET_MAX_PAYLOAD)
         return -EINVAL;
 
@@ -288,21 +301,118 @@ ssize_t pinet_char_read(struct file *filp, char __user *buf, size_t count, loff_
 
     if (!pkt) {
         spin_unlock(&priv->lock);
-        return 0;  // No data to read, return 0 (EOF-like behavior for blocking read)
+        return 0; // No data
     }
 
-    priv->tx_queue = pkt->next;  // Pop from TX queue
+    // Now copy the data FIRST
+    if (copy_to_user(buf, pkt->data, pkt->datalen)) {
+        spin_unlock(&priv->lock);
+        return -EFAULT;
+    }
+
+    // Only after SUCCESSFUL copy: pop the packet
+    priv->tx_queue = pkt->next;
+    //priv->tx_queue_len--;
     spin_unlock(&priv->lock);
 
-    if (copy_to_user(buf, pkt->data, pkt->datalen)) {
-        ret = -EFAULT;
-    } else {
-        ret = pkt->datalen;
-    }
-
+    ret = pkt->datalen;
     kfree(pkt);
+
     return ret;
 }
+
+
+int pinet_send_sensor_data(uint8_t *data, size_t len)
+{
+    struct sk_buff *skb;
+    struct iphdr *iph;
+    struct udphdr *udph;
+    uint8_t *payload;
+    size_t total_len = sizeof(struct iphdr) + sizeof(struct udphdr) + len;
+
+    if (!pinet_dev || !pinet_dev->netdev_ops)
+        return -ENODEV;
+
+    skb = alloc_skb(total_len + NET_IP_ALIGN, GFP_ATOMIC);
+    if (!skb)
+        return -ENOMEM;
+
+    skb_reserve(skb, NET_IP_ALIGN);
+    payload = skb_put(skb, total_len);
+
+    // UDP payload
+    memcpy(payload + sizeof(struct iphdr) + sizeof(struct udphdr), data, len);
+
+    // UDP header
+    udph = (struct udphdr *)(payload + sizeof(struct iphdr));
+    udph->source = htons(PINET_SENSOR_SRC_PORT);
+    udph->dest   = htons(PINET_SENSOR_DST_PORT);
+    udph->len    = htons(sizeof(struct udphdr) + len);
+    udph->check  = 0; // optional
+
+    // IP header
+    iph = (struct iphdr *)payload;
+    iph->version  = 4;
+    iph->ihl      = 5;
+    iph->tos      = 0;
+    iph->tot_len  = htons(total_len);
+    iph->id       = 0;
+    iph->frag_off = 0;
+    iph->ttl      = 64;
+    iph->protocol = IPPROTO_UDP;
+    iph->saddr    = in_aton(PINET_SENSOR_SRC_IP);
+    iph->daddr    = in_aton(PINET_SENSOR_DST_IP);
+    iph->check    = 0; // kernel doesn't care, unless you're simulating real NIC
+
+    skb->dev = pinet_dev;
+    skb->protocol = htons(ETH_P_IP);
+    skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+    return pinet_tx(skb, pinet_dev);
+}
+
+static long pinet_char_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    int sensor_value;
+
+    switch (cmd) {
+    case PINET_IOCTL_SEND_SENSOR_DATA:
+        if (copy_from_user(&sensor_value, (int __user *)arg, sizeof(sensor_value)))
+            return -EFAULT;
+
+        printk(KERN_INFO "pinet: ioctl received sensor value = %d\n", sensor_value);
+
+        return pinet_send_sensor_data((uint8_t *)&sensor_value, sizeof(sensor_value));
+
+    default:
+        return -EINVAL;
+    }
+}
+
+
+static void pinet_flush_tx_queue(struct pinet_priv *priv)
+{
+    struct pinet_packet *pkt, *next_pkt;
+
+    spin_lock(&priv->lock);
+
+    pkt = priv->tx_queue;
+    priv->tx_queue = NULL;
+    //priv->tx_queue_len = 0;
+
+    spin_unlock(&priv->lock);
+
+    while (pkt) {
+        next_pkt = pkt->next;
+        kfree(pkt);
+        pkt = next_pkt;
+    }
+
+    printk(KERN_INFO "pinet: tx_queue flushed\n");
+}
+
+
+
 
 static int pinet_char_open(struct inode *inode, struct file *file)
 {
@@ -316,6 +426,7 @@ static const struct file_operations pinet_fops = {
     .open  = pinet_char_open,     
     .write = pinet_char_write,
     .read  = pinet_char_read,
+    .unlocked_ioctl = pinet_char_ioctl,
 };
 
 
@@ -326,6 +437,8 @@ static int __init pinet_init(void)
     pinet_dev = alloc_netdev(sizeof(struct pinet_priv), "pinet%d", NET_NAME_UNKNOWN, pinet_setup);
     if (!pinet_dev)
         return -ENOMEM;
+        
+    pinet_flush_tx_queue(netdev_priv(pinet_dev));
 
     ret = register_netdev(pinet_dev);
     if (ret)
@@ -362,6 +475,7 @@ static void __exit pinet_exit(void)
     unregister_chrdev(pinet_major, DEVICE_NAME);
 
     if (pinet_dev) {
+        pinet_flush_tx_queue(netdev_priv(pinet_dev));
         unregister_netdev(pinet_dev);
         free_netdev(pinet_dev);
     }
