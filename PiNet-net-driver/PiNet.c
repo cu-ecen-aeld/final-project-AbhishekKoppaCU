@@ -14,6 +14,8 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/device.h>
+#include <linux/ip.h>       
+#include <linux/udp.h>      
 
 MODULE_AUTHOR("Abhishek & Nalin");
 MODULE_LICENSE("GPL");
@@ -22,29 +24,50 @@ MODULE_DESCRIPTION("pinet: A Minimal Virtual Network + Char Driver");
 #define pinet_RX_INTR 0x0001
 #define pinet_TX_INTR 0x0002
 
+#define PINET_MAX_PAYLOAD 4  // Limit payload to 4 bytes (int-sized)
+#define PINET_QUEUE_DEPTH  64  
+
 #define DEVICE_NAME "pinet"
+#define DEVICE "/dev/pinet"
 static int pinet_major;
 static struct class *pinet_class;
 
 struct pinet_packet {
     struct pinet_packet *next;
     struct net_device *dev;
+
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+
     int datalen;
-    u8 data[ETH_DATA_LEN];
+    u8 data[PINET_MAX_PAYLOAD];
 };
+
 
 struct pinet_priv {
     struct net_device_stats stats;
-    int status;
-    struct pinet_packet *rx_queue;
+
+    int status;                     // Interrupt status / driver state
+    struct pinet_packet *rx_queue; // Incoming packets from socket netif_rx()
+    struct pinet_packet *tx_queue; // Outgoing packets to be read via /dev/pinet
+
     int rx_int_enabled;
-    int tx_packetlen;
-    u8 *tx_packetdata;
+
+    int tx_packetlen;              // Current TX buffer length
+    u8 *tx_packetdata;             // Pointer to TX buffer
+
     struct sk_buff *skb;
-    spinlock_t lock;
+
+    spinlock_t lock;               // Lock for accessing tx/rx queues
     struct net_device *dev;
-    struct napi_struct napi;
+
+    struct napi_struct napi;       // NAPI support (if enabled)
 };
+
+
+
 
 static struct net_device *pinet_dev;
 
@@ -55,7 +78,7 @@ static void pinet_release_buffer(struct pinet_packet *pkt)
 
 void pinet_rx(struct net_device *dev, struct pinet_packet *pkt)
 {
-    printk(KERN_INFO "pinet_rx payload: %.*s\n", pkt->datalen, pkt->data);
+    printk(KERN_INFO "pinet_rx received a packet with payload: %.*s\n", pkt->datalen, pkt->data);
     struct sk_buff *skb;
     struct pinet_priv *priv = netdev_priv(dev);
 
@@ -114,38 +137,76 @@ static void pinet_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     if (pkt)
         pinet_release_buffer(pkt);
 }
+ 
+
+struct packet_info {
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint16_t payload_len;
+    char payload[PINET_MAX_PAYLOAD];
+};
 
 static netdev_tx_t pinet_tx(struct sk_buff *skb, struct net_device *dev)
 {
-    printk(KERN_INFO "pinet_tx payload: %.*s\n", skb->len, skb->data);
     struct pinet_priv *priv = netdev_priv(dev);
-    struct pinet_packet *pkt;
 
-    if (skb->len > ETH_DATA_LEN) {
-        dev_kfree_skb(skb);
+    // Only allow IP packets
+    if (skb->protocol != htons(ETH_P_IP)) {
         return NETDEV_TX_OK;
     }
 
-    pkt = kmalloc(sizeof(struct pinet_packet), GFP_ATOMIC);
+    // Ensure the skb has enough data to parse IP + UDP
+    if (!pskb_may_pull(skb, sizeof(struct iphdr) + sizeof(struct udphdr) + PINET_MAX_PAYLOAD)) {
+        return NETDEV_TX_OK;
+    }
+
+    struct iphdr *iph = ip_hdr(skb);
+    if (iph->protocol != IPPROTO_UDP) {
+        return NETDEV_TX_OK;
+    }
+
+    struct udphdr *udph = udp_hdr(skb);
+    int udp_payload_len = ntohs(udph->len) - sizeof(struct udphdr);
+    if (udp_payload_len != PINET_MAX_PAYLOAD) {
+        return NETDEV_TX_OK;
+    }
+
+    // Allocate and fill pinet_packet
+    struct pinet_packet *pkt = kzalloc(sizeof(struct pinet_packet), GFP_ATOMIC);
     if (!pkt) {
         dev_kfree_skb(skb);
         return NETDEV_TX_OK;
     }
 
-    memcpy(pkt->data, skb->data, skb->len);
-    pkt->datalen = skb->len;
-    pkt->dev = dev;
+    unsigned char *udp_payload = (unsigned char *)(udp_hdr(skb) + 1);  // points just after udphdr
+    memcpy(pkt->data, udp_payload, PINET_MAX_PAYLOAD);
+    printk(KERN_INFO "pinet_tx: extracted payload = %d\n", *(int *)pkt->data);
 
+
+    pkt->datalen = PINET_MAX_PAYLOAD;
+    pkt->dev = dev;
+    pkt->src_ip = iph->saddr;
+    pkt->dst_ip = iph->daddr;
+    pkt->src_port = ntohs(udph->source);
+    pkt->dst_port = ntohs(udph->dest);
+
+    printk(KERN_INFO "pinet_tx: accepted packet from %pI4:%u to %pI4:%u, payload=%d\n",
+           &pkt->src_ip, pkt->src_port, &pkt->dst_ip, pkt->dst_port,
+           *(int *)pkt->data);
+
+    // Add to TX queue
     spin_lock(&priv->lock);
-    pkt->next = priv->rx_queue;
-    priv->rx_queue = pkt;
-    priv->status |= pinet_RX_INTR;
+    pkt->next = priv->tx_queue;
+    priv->tx_queue = pkt;
     spin_unlock(&priv->lock);
 
     dev_kfree_skb(skb);
-    pinet_regular_interrupt(0, dev, NULL);
     return NETDEV_TX_OK;
 }
+
+
 
 static int pinet_open(struct net_device *dev)
 {
@@ -212,10 +273,51 @@ static ssize_t pinet_char_write(struct file *file, const char __user *buf, size_
     return len;
 }
 
+ssize_t pinet_char_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+{
+    struct net_device *dev = filp->private_data;
+    struct pinet_priv *priv = netdev_priv(dev);
+    struct pinet_packet *pkt;
+    ssize_t ret = 0;
+
+    if (count < PINET_MAX_PAYLOAD)
+        return -EINVAL;
+
+    spin_lock(&priv->lock);
+    pkt = priv->tx_queue;
+
+    if (!pkt) {
+        spin_unlock(&priv->lock);
+        return 0;  // No data to read, return 0 (EOF-like behavior for blocking read)
+    }
+
+    priv->tx_queue = pkt->next;  // Pop from TX queue
+    spin_unlock(&priv->lock);
+
+    if (copy_to_user(buf, pkt->data, pkt->datalen)) {
+        ret = -EFAULT;
+    } else {
+        ret = pkt->datalen;
+    }
+
+    kfree(pkt);
+    return ret;
+}
+
+static int pinet_char_open(struct inode *inode, struct file *file)
+{
+    file->private_data = pinet_dev;  // Associate netdev for access
+    return 0;
+}
+
+
 static const struct file_operations pinet_fops = {
     .owner = THIS_MODULE,
+    .open  = pinet_char_open,     
     .write = pinet_char_write,
+    .read  = pinet_char_read,
 };
+
 
 static int __init pinet_init(void)
 {
