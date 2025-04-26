@@ -33,7 +33,7 @@ int main() {
     while (1) {
         ssize_t len = recvfrom(sockfd, buf, sizeof(buf)-1, 0, NULL, NULL);
         if (len > 0) {
-            buf[len] = '\0';
+            //buf[len] = '\0';
             write(dev_fd, buf, len);  // write to your char driver
         }
     }
