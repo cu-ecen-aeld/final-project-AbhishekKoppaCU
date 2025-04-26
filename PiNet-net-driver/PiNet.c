@@ -378,6 +378,7 @@ int pinet_send_sensor_data(uint8_t *data, size_t len)
     skb->dev = pinet_dev;
     skb->protocol = htons(ETH_P_IP);
     skb->ip_summed = CHECKSUM_UNNECESSARY;
+    skb_reset_network_header(skb);
 
     printk(KERN_DEBUG "pinet_send_sensor_data: Successfully created skb, sending to pinet_tx\n");
     return pinet_tx(skb, pinet_dev);
@@ -392,7 +393,7 @@ static long pinet_char_ioctl(struct file *file, unsigned int cmd, unsigned long 
         if (copy_from_user(&sensor_value, (int __user *)arg, sizeof(sensor_value)))
             return -EFAULT;
 
-        printk(KERN_NOTICE "pinet: ioctl received sensor value = %d\n", sensor_value);
+        printk(KERN_NOTICE "pinet: ioctl received sensor data = %d\n", sensor_value);
 
         return pinet_send_sensor_data((uint8_t *)&sensor_value, sizeof(sensor_value));
 
