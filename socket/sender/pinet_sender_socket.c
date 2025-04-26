@@ -67,7 +67,7 @@ int main(int argc, char *argv[]) {
             break;
         } else if (len == 0) {
             printf("char driver read() returned 0\n");
-            usleep(10000);
+            sleep(1);
             continue;
         }
 
