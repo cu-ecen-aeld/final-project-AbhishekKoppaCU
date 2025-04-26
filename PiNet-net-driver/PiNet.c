@@ -379,6 +379,7 @@ int pinet_send_sensor_data(uint8_t *data, size_t len)
     skb->protocol = htons(ETH_P_IP);
     skb->ip_summed = CHECKSUM_UNNECESSARY;
     skb_reset_network_header(skb);
+    skb_set_transport_header(skb, sizeof(struct iphdr)); 
 
     printk(KERN_DEBUG "pinet_send_sensor_data: Successfully created skb, sending to pinet_tx\n");
     return pinet_tx(skb, pinet_dev);
