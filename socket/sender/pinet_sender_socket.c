@@ -66,6 +66,7 @@ int main(int argc, char *argv[]) {
             perror("read from /dev/pinet");
             break;
         } else if (len == 0) {
+            printf("char driver read() returned 0\n");
             usleep(10000);
             continue;
         }

@@ -90,7 +90,7 @@ static void pinet_release_buffer(struct pinet_packet *pkt)
 
 void pinet_rx(struct net_device *dev, struct pinet_packet *pkt)
 {
-    printk(KERN_INFO "pinet_rx received a packet with payload: %.*s\n", pkt->datalen, pkt->data);
+    printk(KERN_NOTICE "pinet_rx received a packet with payload: %.*s\n", pkt->datalen, pkt->data);
     struct sk_buff *skb;
     struct pinet_priv *priv = netdev_priv(dev);
 
@@ -164,38 +164,45 @@ static netdev_tx_t pinet_tx(struct sk_buff *skb, struct net_device *dev)
 {
     struct pinet_priv *priv = netdev_priv(dev);
 
-    // Only allow IP packets
-    if (skb->protocol != htons(ETH_P_IP)) {
+    if (!skb) {
+        printk(KERN_NOTICE "pinet_tx: skb is NULL\n");
         return NETDEV_TX_OK;
     }
 
-    // Ensure the skb has enough data to parse IP + UDP
+    if (skb->protocol != htons(ETH_P_IP)) {
+        printk(KERN_NOTICE "pinet_tx: Not an IP packet, protocol=0x%x\n", ntohs(skb->protocol));
+        return NETDEV_TX_OK;
+    }
+
     if (!pskb_may_pull(skb, sizeof(struct iphdr) + sizeof(struct udphdr) + PINET_MAX_PAYLOAD)) {
+        printk(KERN_NOTICE "pinet_tx: Packet too short, cannot pull headers\n");
         return NETDEV_TX_OK;
     }
 
     struct iphdr *iph = ip_hdr(skb);
     if (iph->protocol != IPPROTO_UDP) {
+        printk(KERN_NOTICE "pinet_tx: Not a UDP packet, protocol=%d\n", iph->protocol);
         return NETDEV_TX_OK;
     }
 
     struct udphdr *udph = udp_hdr(skb);
     int udp_payload_len = ntohs(udph->len) - sizeof(struct udphdr);
     if (udp_payload_len != PINET_MAX_PAYLOAD) {
+        printk(KERN_NOTICE "pinet_tx: UDP payload length mismatch: %d (expected %d)\n",
+               udp_payload_len, PINET_MAX_PAYLOAD);
         return NETDEV_TX_OK;
     }
 
-    // Allocate and fill pinet_packet
     struct pinet_packet *pkt = kzalloc(sizeof(struct pinet_packet), GFP_ATOMIC);
     if (!pkt) {
+        printk(KERN_NOTICE "pinet_tx: Failed to allocate pinet_packet\n");
         dev_kfree_skb(skb);
         return NETDEV_TX_OK;
     }
 
-    unsigned char *udp_payload = (unsigned char *)(udp_hdr(skb) + 1);  // points just after udphdr
+    unsigned char *udp_payload = (unsigned char *)(udp_hdr(skb) + 1);
     memcpy(pkt->data, udp_payload, PINET_MAX_PAYLOAD);
-    printk(KERN_INFO "pinet_tx: extracted payload = %d\n", *(int *)pkt->data);
-
+    printk(KERN_DEBUG "pinet_tx: extracted payload = %d\n", *(int *)pkt->data);
 
     pkt->datalen = PINET_MAX_PAYLOAD;
     pkt->dev = dev;
@@ -204,17 +211,18 @@ static netdev_tx_t pinet_tx(struct sk_buff *skb, struct net_device *dev)
     pkt->src_port = ntohs(udph->source);
     pkt->dst_port = ntohs(udph->dest);
 
-    printk(KERN_INFO "pinet_tx: accepted packet from %pI4:%u to %pI4:%u, payload=%d\n",
+    printk(KERN_DEBUG "pinet_tx: accepted packet from %pI4:%u to %pI4:%u, payload=%d\n",
            &pkt->src_ip, pkt->src_port, &pkt->dst_ip, pkt->dst_port,
            *(int *)pkt->data);
 
-    // Add to TX queue
+    // Push into tx_queue
     spin_lock(&priv->lock);
     pkt->next = priv->tx_queue;
     priv->tx_queue = pkt;
     spin_unlock(&priv->lock);
 
     dev_kfree_skb(skb);
+
     return NETDEV_TX_OK;
 }
 
@@ -269,7 +277,7 @@ static ssize_t pinet_char_write(struct file *file, const char __user *buf, size_
     if (copy_from_user(kbuf, buf, len))
         return -EFAULT;
 
-    printk(KERN_INFO "pinet: Received from user: %s\n", kbuf);
+    printk(KERN_NOTICE "pinet: Received from user: %s\n", kbuf);
 
     struct pinet_packet *pkt = kmalloc(sizeof(struct pinet_packet), GFP_KERNEL);
     if (!pkt)
@@ -321,7 +329,6 @@ ssize_t pinet_char_read(struct file *filp, char __user *buf, size_t count, loff_
     return ret;
 }
 
-
 int pinet_send_sensor_data(uint8_t *data, size_t len)
 {
     struct sk_buff *skb;
@@ -330,27 +337,31 @@ int pinet_send_sensor_data(uint8_t *data, size_t len)
     uint8_t *payload;
     size_t total_len = sizeof(struct iphdr) + sizeof(struct udphdr) + len;
 
-    if (!pinet_dev || !pinet_dev->netdev_ops)
+    if (!pinet_dev || !pinet_dev->netdev_ops) {
+        printk(KERN_NOTICE "pinet_send_sensor_data: pinet_dev not ready\n");
         return -ENODEV;
+    }
 
     skb = alloc_skb(total_len + NET_IP_ALIGN, GFP_ATOMIC);
-    if (!skb)
+    if (!skb) {
+        printk(KERN_NOTICE "pinet_send_sensor_data: Failed to allocate skb\n");
         return -ENOMEM;
+    }
 
     skb_reserve(skb, NET_IP_ALIGN);
     payload = skb_put(skb, total_len);
 
-    // UDP payload
+    // Fill UDP payload
     memcpy(payload + sizeof(struct iphdr) + sizeof(struct udphdr), data, len);
 
-    // UDP header
+    // Fill UDP header
     udph = (struct udphdr *)(payload + sizeof(struct iphdr));
     udph->source = htons(PINET_SENSOR_SRC_PORT);
     udph->dest   = htons(PINET_SENSOR_DST_PORT);
     udph->len    = htons(sizeof(struct udphdr) + len);
-    udph->check  = 0; // optional
+    udph->check  = 0;
 
-    // IP header
+    // Fill IP header
     iph = (struct iphdr *)payload;
     iph->version  = 4;
     iph->ihl      = 5;
@@ -362,12 +373,13 @@ int pinet_send_sensor_data(uint8_t *data, size_t len)
     iph->protocol = IPPROTO_UDP;
     iph->saddr    = in_aton(PINET_SENSOR_SRC_IP);
     iph->daddr    = in_aton(PINET_SENSOR_DST_IP);
-    iph->check    = 0; // kernel doesn't care, unless you're simulating real NIC
+    iph->check    = 0;
 
     skb->dev = pinet_dev;
     skb->protocol = htons(ETH_P_IP);
     skb->ip_summed = CHECKSUM_UNNECESSARY;
 
+    printk(KERN_DEBUG "pinet_send_sensor_data: Successfully created skb, sending to pinet_tx\n");
     return pinet_tx(skb, pinet_dev);
 }
 
@@ -380,7 +392,7 @@ static long pinet_char_ioctl(struct file *file, unsigned int cmd, unsigned long 
         if (copy_from_user(&sensor_value, (int __user *)arg, sizeof(sensor_value)))
             return -EFAULT;
 
-        printk(KERN_INFO "pinet: ioctl received sensor value = %d\n", sensor_value);
+        printk(KERN_NOTICE "pinet: ioctl received sensor value = %d\n", sensor_value);
 
         return pinet_send_sensor_data((uint8_t *)&sensor_value, sizeof(sensor_value));
 
@@ -408,7 +420,7 @@ static void pinet_flush_tx_queue(struct pinet_priv *priv)
         pkt = next_pkt;
     }
 
-    printk(KERN_INFO "pinet: tx_queue flushed\n");
+    printk(KERN_NOTICE "pinet: tx_queue flushed\n");
 }
 
 
