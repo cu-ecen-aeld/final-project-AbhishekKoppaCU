@@ -1,10 +1,11 @@
-// udp_to_pinet.c
+// udp_to_pinet_receiver.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
+#include <stdint.h>  // For uint32_t
 
 #define PORT 12345
 #define DEVICE "/dev/pinet"
@@ -29,12 +30,27 @@ int main() {
 
     printf("Listening on UDP port %d...\n", PORT);
 
-    char buf[128];
+    uint8_t buffer[64];
     while (1) {
-        ssize_t len = recvfrom(sockfd, buf, sizeof(buf)-1, 0, NULL, NULL);
-        if (len > 0) {
-            buf[len] = '\0';
-            write(dev_fd, buf, len);  // write to your char driver
+        ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
+        if (len < 0) {
+            perror("recvfrom");
+            break;
+        }
+
+        if (len >= sizeof(uint32_t)) { // Only handle 4 bytes (or more if future expands)
+            uint32_t num;
+            memcpy(&num, buffer, sizeof(uint32_t));
+
+            printf("Received value: %d (writing to /dev/pinet)\n", num);
+
+            // Write exactly 4 bytes to /dev/pinet
+            ssize_t written = write(dev_fd, &num, sizeof(num));
+            if (written != sizeof(num)) {
+                perror("write to /dev/pinet");
+            }
+        } else {
+            printf("Received too few bytes: %ld bytes\n", len);
         }
     }
 
