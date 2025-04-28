@@ -42,8 +42,7 @@ int main() {
             uint32_t num;
             memcpy(&num, buffer, sizeof(uint32_t));
 
-            // No ntohl() here because sender sends in *host byte order*
-            // (your sending code doesn't do htonl before sendto)
+            
 
             printf("Received value: %d (writing to /dev/pinet)\n", num);
 
