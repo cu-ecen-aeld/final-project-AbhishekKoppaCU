@@ -88,15 +88,38 @@ static void pinet_release_buffer(struct pinet_packet *pkt)
     kfree(pkt);
 }
 
+
 void pinet_rx(struct net_device *dev, struct pinet_packet *pkt)
 {
     printk(KERN_NOTICE "pinet_rx received a packet with payload: %.*s\n", pkt->datalen, pkt->data);
+
+    // First, extract the sensor value and write to /tmp/proxpipe
+    if (pkt->datalen >= sizeof(int)) {
+        int sensor_value;
+        memcpy(&sensor_value, pkt->data, sizeof(sensor_value));
+
+        printk(KERN_NOTICE "pinet_rx: Extracted sensor value = %d\n", sensor_value);
+
+        struct file *pipe_filp;
+        loff_t pos = 0;
+
+        pipe_filp = filp_open("/tmp/proxpipe", O_WRONLY | O_NONBLOCK, 0);
+        if (!IS_ERR(pipe_filp)) {
+            kernel_write(pipe_filp, (char *)&sensor_value, sizeof(sensor_value), &pos);
+            //filp_close(pipe_filp, NULL);
+        } else {
+            printk(KERN_NOTICE "pinet_rx: Failed to open /tmp/proxpipe for writing\n");
+        }
+    } else {
+        printk(KERN_NOTICE "pinet_rx: Packet too small, skipping /tmp/proxpipe write\n");
+    }
+
     struct sk_buff *skb;
     struct pinet_priv *priv = netdev_priv(dev);
 
     skb = dev_alloc_skb(pkt->datalen + 2);
     if (!skb) {
-        printk(KERN_NOTICE "pinet rx: low on mem - packet dropped\n");
+        printk(KERN_NOTICE "pinet_rx: low on mem - packet dropped\n");
         priv->stats.rx_dropped++;
         goto out;
     }
@@ -115,6 +138,7 @@ void pinet_rx(struct net_device *dev, struct pinet_packet *pkt)
 out:
     return;
 }
+
 
 static void pinet_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
