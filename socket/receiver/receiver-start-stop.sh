@@ -6,7 +6,7 @@ case "$1" in
     /usr/bin/pinet_receiver &
     ;;
   stop)
-    echo "Stopping VNCL daemon"
+    echo "Stopping  daemon"
     killall pinet_receiver
     ;;
   restart)
