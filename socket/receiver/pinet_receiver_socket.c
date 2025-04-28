@@ -93,12 +93,7 @@ int main() {
             if (written != sizeof(num)) {
                 perror("write to /dev/pinet");
             }
-
-            // Also write to /tmp/proxpipe
-            written = write(pipe_fd, &num, sizeof(num));
-            if (written != sizeof(num)) {
-                syslog(LOG_ERR, "Failed to write to FIFO: %s", strerror(errno));
-            }
+            
         } else {
             printf("Received too few bytes: %ld bytes\n", len);
         }
