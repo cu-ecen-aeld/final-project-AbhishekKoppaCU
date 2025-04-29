@@ -3,7 +3,7 @@
 case "$1" in
   start)
     echo "Starting sender"
-    /usr/bin/pinet_sender 172.20.10.3 wlan0 &
+    /usr/bin/pinet_sender 172.20.10.4 wlan0 &
     ;;
   stop)
     echo "Stopping  daemon"
