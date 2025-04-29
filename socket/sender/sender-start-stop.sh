@@ -3,10 +3,10 @@
 case "$1" in
   start)
     echo "Starting sender"
-    /usr/bin/pinet_sender &
+    /usr/bin/pinet_sender 172.20.10.3 wlan0 &
     ;;
   stop)
-    echo "Stopping VNCL daemon"
+    echo "Stopping  daemon"
     killall pinet_sender
     ;;
   restart)
