@@ -1,7 +1,7 @@
 # Embedded Linux-Based Network Driver for Peer-to-Peer Communication
 
 ## Project Overview: 
-[Project Overview Wiki Page]https://github.com/cu-ecen-aeld/final-project-nasa7792/wiki/Final-project-Overview
+[Project Overview Wiki Page]https://github.com/cu-ecen-aeld/final-project-AbhishekKoppaCU/wiki/Final-Project-Overview
 
 ## Project Goals
 - Interfacing of sensor over I2C on a Linux Environment
