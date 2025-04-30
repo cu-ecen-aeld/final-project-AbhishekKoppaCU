@@ -1,5 +1,8 @@
 /*
  * pinet.c - A Minimal Linux Network + Character Driver (Virtual)
+ * The network driver implementation is done by refering parts of the snull implementation from LDD3 Text Book.
+ * OpenAI's ChatGPT is refered for packet contruction and field descriptions 
+ *
  */
 
 #include <linux/module.h>
